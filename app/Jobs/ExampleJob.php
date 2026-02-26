@@ -161,18 +161,14 @@ class LearnJob implements ShouldQueue, ShouldBeUnique, ShouldBeEncrypted
     public bool $deleteWhenMissingModels = true;
 
     /**
-     * ⚠️ ВАЖНО ДЛЯ СОБЕСЕДОВАНИЯ:
-     * Всё что передаётся в конструктор — СЕРИАЛИЗУЕТСЯ в payload очереди.
-     * - Eloquent модели → сериализуются как ID (благодаря SerializesModels)
-     * - Closures → НЕ сериализуются (будет ошибка)
-     * - Большие объекты → увеличивают payload, лучше передавать ID
-     *
-     *  ⚠️ НЮАНСЫ СЕРИАЛИЗАЦИИ (Вопрос на Senior):
-     *  1. Public свойства: Сериализуются в payload (JSON).
-     *  2. Protected/Private свойства: Также сериализуются (начиная с PHP 7.4+ и новых версий Laravel).
-     *  3. Closures (анонимные функции): НЕ сериализуются! Вызовут Exception.
-     *  4. Если передать `Order $order`, трейт `SerializesModels` сохранит только `class` и `id`.
-     *  При выполнении Laravel сам сделает `Order::findOrFail($id)` в методе `__wakeup()`.
+     * ⚠️ ВАЖНО ДЛЯ СОБЕСЕДОВАНИЯ (Serialization):
+     * 1. Конструктор = Payload: Все данные из __construct сериализуются в JSON для очереди.
+     * 2. Eloquent Модели: Благодаря трейту SerializesModels сохраняются только ID и класс.
+     * 3. Воркер делает Order::findOrFail($id) перед выполнением (метод __wakeup).
+     * 4. Свойства: Public, Protected и Private свойства сериализуются полностью (PHP 7.4+).
+     * 5. Запрещено: Closures (замыкания) и Resources (файлы/соединения) вызовут Exception.
+     * 6. Оптимизация: Большие объекты раздувают payload — передавайте ID, а не сам объект.
+     * 7. Свежесть: В handle() всегда актуальные данные из БД, а не слепок на момент отправки.
      */
     public function __construct(
         public readonly int   $orderId,
