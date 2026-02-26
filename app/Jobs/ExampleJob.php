@@ -2,40 +2,57 @@
 
 namespace App\Jobs;
 
+use Illuminate\Bus\Batchable;
 use Illuminate\Bus\Queueable;
-use Illuminate\Contracts\Queue\ShouldQueue;
-use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldBeEncrypted;
+use Illuminate\Contracts\Queue\ShouldBeUnique;
+use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
-use Illuminate\Queue\SerializesModels;
-use Illuminate\Queue\Middleware\WithoutOverlapping;
 use Illuminate\Queue\Middleware\RateLimited;
 use Illuminate\Queue\Middleware\ThrottlesExceptions;
+use Illuminate\Queue\Middleware\WithoutOverlapping;
+use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
 use Throwable;
+
+// use Illuminate\Support\Facades\Context;
 
 /**
  * ============================================================
  * ПОЛНЫЙ REFERENCE JOB ДЛЯ СОБЕСЕДОВАНИЯ ПО LARAVEL
  * ============================================================
  *
- * ShouldQueue      — маркер того, что job выполняется АСИНХРОННО (через queue worker)
+ * ShouldQueue — маркер того, что job выполняется АСИНХРОННО (через queue worker)
  *                    Без него job выполнится СИНХРОННО в текущем процессе
  *
- * ShouldBeUnique   — гарантирует что в очереди не будет дублей этого job
+ * ShouldBeUnique — гарантирует что в очереди не будет дублей этого job
  *                    (пока job в очереди или выполняется, повторный dispatch игнорируется)
+ *
+ * ShouldBeUniqueUntilProcessing — Блок держится ТОЛЬКО ПОКА Job В ОЧЕРЕДИ.
  *
  * ShouldBeEncrypted — payload job будет зашифрован в хранилище очереди
  *                     (полезно для персональных данных — GDPR и т.д.)
  */
-class ExampleJob implements ShouldQueue, ShouldBeUnique, ShouldBeEncrypted
+class LearnJob implements ShouldQueue, ShouldBeUnique, ShouldBeEncrypted
 {
-    use Dispatchable;       // Даёт статические методы: dispatch(), dispatchSync(), dispatchAfterResponse()
-    use InteractsWithQueue; // Даёт доступ к $this->attempts(), $this->delete(), $this->release(), $this->fail()
-    use Queueable;          // Даёт свойства: $connection, $queue, $delay, $afterCommit и chain-методы
-    use SerializesModels;   // Автоматически сериализует Eloquent модели по ID и десериализует обратно
-                            // ⚠️ Важно: сохраняется только ID, модель загружается заново при выполнении
+    // Позволяет Job быть частью Bus::batch()
+    use Batchable;
+
+    // Все трейты ниже спрятаны в одном Queueable и используются обязательно!
+
+    // Даёт статические методы: dispatch(), dispatchSync(), dispatchAfterResponse()
+    use Dispatchable;
+
+    // Даёт доступ к $this->attempts(), $this->delete(), $this->release(), $this->fail()
+    use InteractsWithQueue;
+
+    // Даёт свойства: $connection, $queue, $delay, $afterCommit и chain-методы
+    use Queueable;
+
+    // Автоматически сериализует Eloquent модели по ID и десериализует обратно
+    // Важно: сохраняется только ID, модель загружается заново при выполнении
+    use SerializesModels;
 
     // ============================================================
     // ОСНОВНЫЕ СВОЙСТВА ОЧЕРЕДИ
@@ -44,8 +61,6 @@ class ExampleJob implements ShouldQueue, ShouldBeUnique, ShouldBeEncrypted
     /**
      * Имя соединения (connection) — какой драйвер использовать.
      * Определяется в config/queue.php: redis, database, sqs, beanstalkd, sync
-     *
-     * ⚠️ Connection ≠ Queue. Connection — это ДРАЙВЕР, Queue — это ТРУБА внутри драйвера.
      */
     public $connection = 'redis';
 
@@ -60,7 +75,7 @@ class ExampleJob implements ShouldQueue, ShouldBeUnique, ShouldBeEncrypted
      * Задержка перед выполнением (в секундах).
      * Job попадёт в очередь, но worker возьмёт его не раньше чем через delay.
      */
-    public $delay = 0;
+    public $delay = 0; // Можно передать \DateTime или Carbon
 
     // ============================================================
     // RETRY / TIMEOUT / BACKOFF
@@ -73,14 +88,14 @@ class ExampleJob implements ShouldQueue, ShouldBeUnique, ShouldBeEncrypted
      * ⚠️ Взаимоисключающе с $retryUntil (метод retryUntil()).
      * Если задан retryUntil, tries игнорируется.
      */
-    public $tries = 3;
+    public int $tries = 3;
 
     /**
      * Максимальное количество ИСКЛЮЧЕНИЙ (не попыток!).
      * Разница: если job делает release() — это попытка, но не exception.
      * $maxExceptions считает только реальные throw.
      */
-    public $maxExceptions = 2;
+    public int $maxExceptions = 2;
 
     /**
      * Таймаут выполнения job в секундах.
@@ -90,7 +105,7 @@ class ExampleJob implements ShouldQueue, ShouldBeUnique, ShouldBeEncrypted
      * ⚠️ Должен быть МЕНЬШЕ чем retry_after в config/queue.php,
      *     иначе job может быть взят повторно другим worker'ом.
      */
-    public $timeout = 120;
+    public int $timeout = 120;
 
     /**
      * Backoff — задержка (в секундах) между повторными попытками.
@@ -101,7 +116,78 @@ class ExampleJob implements ShouldQueue, ShouldBeUnique, ShouldBeEncrypted
      *
      * Можно также определить как метод для динамической логики.
      */
-    public $backoff = [10, 30, 60];
+    public array $backoff = [10, 30, 60];
+
+    /**
+     * Уникальный ID для предотвращения дублей.
+     * По умолчанию = FQCN класса. Переопределяем для уникальности по параметру.
+     *
+     * Пример: если $orderId = 42, то в очереди может быть только один
+     * ExampleJob для заказа #42.
+     */
+    public int $uniqueId;
+
+    // ============================================================
+    // UNIQUENESS (ShouldBeUnique)
+    // ============================================================
+    /**
+     * Время жизни уникальной блокировки (в секундах).
+     * После истечения — можно dispatch снова, даже если job ещё в очереди.
+     * По умолчанию блокировка снимается когда job завершится.
+     */
+    public int $uniqueFor = 3600; // 1 час
+
+    /**
+     * Кэш-драйвер для хранения lock'а уникальности.
+     * По умолчанию — default cache driver из config/cache.php.
+     */
+    public string $uniqueVia;
+
+    /**
+     * Если true — job dispatched только ПОСЛЕ коммита транзакции БД.
+     * Предотвращает ситуацию когда job берётся worker'ом, а данные ещё не закоммичены.
+     *
+     * Можно установить глобально: config/queue.php → 'after_commit' => true
+     */
+    public $afterCommit = true;
+
+    // ============================================================
+    // BATCH & CHAIN
+    // ============================================================
+    /**
+     * Удалить job из очереди если модель (SerializesModels) была удалена
+     * к моменту выполнения. Без этого — выбросит ModelNotFoundException.
+     */
+    public bool $deleteWhenMissingModels = true;
+
+    /**
+     * ⚠️ ВАЖНО ДЛЯ СОБЕСЕДОВАНИЯ:
+     * Всё что передаётся в конструктор — СЕРИАЛИЗУЕТСЯ в payload очереди.
+     * - Eloquent модели → сериализуются как ID (благодаря SerializesModels)
+     * - Closures → НЕ сериализуются (будет ошибка)
+     * - Большие объекты → увеличивают payload, лучше передавать ID
+     *
+     *  ⚠️ НЮАНСЫ СЕРИАЛИЗАЦИИ (Вопрос на Senior):
+     *  1. Public свойства: Сериализуются в payload (JSON).
+     *  2. Protected/Private свойства: Также сериализуются (начиная с PHP 7.4+ и новых версий Laravel).
+     *  3. Closures (анонимные функции): НЕ сериализуются! Вызовут Exception.
+     *  4. Если передать `Order $order`, трейт `SerializesModels` сохранит только `class` и `id`.
+     *  При выполнении Laravel сам сделает `Order::findOrFail($id)` в методе `__wakeup()`.
+     */
+    public function __construct(
+        public readonly int   $orderId,
+        public readonly array $options = [],
+    )
+    {
+        // Можно переопределить queue/connection прямо в конструкторе:
+        // $this->onQueue('critical');
+        // $this->onConnection('sqs');
+        // $this->delay(now()->addMinutes(5));
+    }
+
+    // ============================================================
+    // CONSTRUCTOR
+    // ============================================================
 
     /**
      * Альтернатива $tries — повторять до указанного времени.
@@ -113,77 +199,13 @@ class ExampleJob implements ShouldQueue, ShouldBeUnique, ShouldBeEncrypted
     }
 
     // ============================================================
-    // UNIQUENESS (ShouldBeUnique)
-    // ============================================================
-
-    /**
-     * Уникальный ID для предотвращения дублей.
-     * По умолчанию = FQCN класса. Переопределяем для уникальности по параметру.
-     *
-     * Пример: если $orderId = 42, то в очереди может быть только один
-     * ExampleJob для заказа #42.
-     */
-    public $uniqueId;
-
-    /**
-     * Время жизни уникальной блокировки (в секундах).
-     * После истечения — можно dispatch снова, даже если job ещё в очереди.
-     * По умолчанию блокировка снимается когда job завершится.
-     */
-    public $uniqueFor = 3600; // 1 час
-
-    /**
-     * Кэш-драйвер для хранения lock'а уникальности.
-     * По умолчанию — default cache driver из config/cache.php.
-     */
-    public $uniqueVia;
-
-    // ============================================================
-    // BATCH & CHAIN
-    // ============================================================
-
-    /**
-     * Если true — job dispatched только ПОСЛЕ коммита транзакции БД.
-     * Предотвращает ситуацию когда job берётся worker'ом, а данные ещё не закоммичены.
-     *
-     * Можно установить глобально: config/queue.php → 'after_commit' => true
-     */
-    public $afterCommit = true;
-
-    /**
-     * Удалить job из очереди если модель (SerializesModels) была удалена
-     * к моменту выполнения. Без этого — выбросит ModelNotFoundException.
-     */
-    public $deleteWhenMissingModels = true;
-
-    // ============================================================
-    // CONSTRUCTOR
-    // ============================================================
-
-    /**
-     * ⚠️ ВАЖНО ДЛЯ СОБЕСЕДОВАНИЯ:
-     * Всё что передаётся в конструктор — СЕРИАЛИЗУЕТСЯ в payload очереди.
-     * - Eloquent модели → сериализуются как ID (благодаря SerializesModels)
-     * - Closures → НЕ сериализуются (будет ошибка)
-     * - Большие объекты → увеличивают payload, лучше передавать ID
-     */
-    public function __construct(
-        public readonly int $orderId,
-        public readonly array $options = [],
-    ) {
-        // Можно переопределить queue/connection прямо в конструкторе:
-        // $this->onQueue('critical');
-        // $this->onConnection('sqs');
-        // $this->delay(now()->addMinutes(5));
-    }
-
-    // ============================================================
     // MIDDLEWARE
     // ============================================================
 
     /**
      * Middleware выполняются ДО handle().
      * Позволяют контролировать выполнение без загромождения бизнес-логики.
+     * ⚠️ Важно: задача заблокированная middleware засчитывается за попытку (tries), так как была взята worker.
      */
     public function middleware(): array
     {
@@ -191,9 +213,9 @@ class ExampleJob implements ShouldQueue, ShouldBeUnique, ShouldBeEncrypted
             // Предотвращает одновременное выполнение job'ов с одинаковым ключом.
             // Если другой job с таким ключом уже выполняется — текущий вернётся в очередь.
             (new WithoutOverlapping($this->orderId))
-                ->releaseAfter(60)      // Через сколько секунд отпустить lock если job завис
+                ->releaseAfter(60)      // Через сколько секунд попробовать запустить job еще раз
                 ->dontRelease()         // Или: не возвращать в очередь, просто удалить
-                ->expireAfter(300),     // Lock автоматически истекает через 5 минут
+                ->expireAfter(300),     // Lock автоматически истекает через 5 минут если не был снят. Например: job завис.
 
             // Rate limiting — ограничение частоты выполнения.
             // Лимит определяется в AppServiceProvider через RateLimiter::for('exports', ...)
@@ -201,7 +223,7 @@ class ExampleJob implements ShouldQueue, ShouldBeUnique, ShouldBeEncrypted
 
             // Троттлинг исключений — если job падает слишком часто,
             // увеличивает задержку перед retry.
-            (new ThrottlesExceptions(maxAttempts: 5, decayMinutes: 10))
+            (new ThrottlesExceptions(maxAttempts: 5, decaySeconds: 3600))
                 ->backoff(5),           // Начальная задержка 5 минут
         ];
     }
@@ -212,7 +234,7 @@ class ExampleJob implements ShouldQueue, ShouldBeUnique, ShouldBeEncrypted
 
     /**
      * ⚠️ ВАЖНО: handle() поддерживает Dependency Injection через Service Container.
-     * Можно тайпхинтить любые сервисы — Laravel их автоматически зарезолвит.
+     * Можно typehint любые сервисы — Laravel их автоматически зарезолвит.
      */
     public function handle(/* OrderService $orderService */): void
     {
