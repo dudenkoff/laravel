@@ -37,11 +37,12 @@ use Throwable;
 class LearnJob implements ShouldQueue, ShouldBeUnique, ShouldBeEncrypted
 {
     // Позволяет Job быть частью Bus::batch()
+    // Добавляет методы $this->batch(), $this->batchId и $this->cancelled()
     use Batchable;
 
     // Все трейты ниже спрятаны в одном Queueable и используются обязательно!
 
-    // Даёт статические методы: dispatch(), dispatchSync(), dispatchAfterResponse()
+    // Даёт статические методы: ::dispatch(), ::dispatchSync(), ::dispatchAfterResponse()
     use Dispatchable;
 
     // Даёт доступ к $this->attempts(), $this->delete(), $this->release(), $this->fail()
@@ -76,6 +77,14 @@ class LearnJob implements ShouldQueue, ShouldBeUnique, ShouldBeEncrypted
      * Job попадёт в очередь, но worker возьмёт его не раньше чем через delay.
      */
     public $delay = 0; // Можно передать \DateTime или Carbon
+
+    /**
+     * Если true — job dispatched только ПОСЛЕ коммита транзакции БД.
+     * Предотвращает ситуацию когда job берётся worker'ом, а данные ещё не закоммичены.
+     *
+     * Можно установить глобально: config/queue.php → 'after_commit' => true
+     */
+    public $afterCommit = true;
 
     // ============================================================
     // RETRY / TIMEOUT / BACKOFF
@@ -118,6 +127,10 @@ class LearnJob implements ShouldQueue, ShouldBeUnique, ShouldBeEncrypted
      */
     public array $backoff = [10, 30, 60];
 
+    // ============================================================
+    // UNIQUENESS (ShouldBeUnique)
+    // ============================================================
+    
     /**
      * Уникальный ID для предотвращения дублей.
      * По умолчанию = FQCN класса. Переопределяем для уникальности по параметру.
@@ -127,9 +140,6 @@ class LearnJob implements ShouldQueue, ShouldBeUnique, ShouldBeEncrypted
      */
     public int $uniqueId;
 
-    // ============================================================
-    // UNIQUENESS (ShouldBeUnique)
-    // ============================================================
     /**
      * Время жизни уникальной блокировки (в секундах).
      * После истечения — можно dispatch снова, даже если job ещё в очереди.
@@ -142,14 +152,6 @@ class LearnJob implements ShouldQueue, ShouldBeUnique, ShouldBeEncrypted
      * По умолчанию — default cache driver из config/cache.php.
      */
     public string $uniqueVia;
-
-    /**
-     * Если true — job dispatched только ПОСЛЕ коммита транзакции БД.
-     * Предотвращает ситуацию когда job берётся worker'ом, а данные ещё не закоммичены.
-     *
-     * Можно установить глобально: config/queue.php → 'after_commit' => true
-     */
-    public $afterCommit = true;
 
     // ============================================================
     // BATCH & CHAIN
